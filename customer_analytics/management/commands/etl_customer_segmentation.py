@@ -14,8 +14,10 @@ to the model as a feature. Segmenting is now a separate step:
 """
 
 import pandas as pd
+from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import connection, transaction
+from django.utils import timezone as dj_timezone
 
 from customer_analytics.models import CustomerOLAP
 
@@ -79,6 +81,15 @@ class Command(BaseCommand):
         # data ends in 2006, so using today would make every customer equally
         # stale and recency would carry no signal.
         df["last_rental_date"] = pd.to_datetime(df["last_rental_date"])
+        if settings.USE_TZ:
+            # dvdrental stores rental_date as `timestamp without time zone`, so
+            # the values come back naive. Attach the project timezone here
+            # rather than let the ORM warn once per customer on insert.
+            df["last_rental_date"] = df["last_rental_date"].dt.tz_localize(
+                dj_timezone.get_current_timezone(),
+                ambiguous=True,
+                nonexistent="shift_forward",
+            )
         snapshot = df["last_rental_date"].max()
         df["recency_days"] = (snapshot - df["last_rental_date"]).dt.days
 
