@@ -1,67 +1,144 @@
 # DVD Rental Customer Segmentation
 
-Full-stack Django web application for customer segmentation on the PostgreSQL dvdrental sample database. Includes an ETL pipeline that extracts customer behavior features from the OLTP schema, a Random Forest classifier for segment prediction, and an interactive dashboard for exploring results.
+Django application that segments customers of the PostgreSQL `dvdrental` sample
+database. An ETL step aggregates transactional rentals and payments into
+customer-level RFM features, a clustering step groups customers on those
+features, and a small web interface exposes the result as a dashboard, a
+searchable customer list, and a form that places an unseen customer into a
+segment.
 
-## Features
-
-- **ETL Pipeline** -- Extracts rental and payment data from the dvdrental OLTP database, transforms it into customer-level features (RFM metrics, rental duration, film diversity), and loads it into an OLAP table for analysis.
-- **ML Model Training** -- Trains a Random Forest classifier on the OLAP data to segment customers into groups (e.g., Premium, Standard, Basic, At-Risk). Model artifacts are versioned and stored for serving.
-- **Prediction Interface** -- Web form where you can input customer metrics and get a real-time segment prediction via AJAX.
-- **Dashboard** -- Visual overview of customer segments, segment distribution, and key metrics.
-- **Django Admin** -- Full admin interface for managing OLAP data and model metadata.
-
-## Architecture
+## Pipeline
 
 ```
-dvdrental (PostgreSQL OLTP)
+dvdrental (PostgreSQL, OLTP)
+        |
+        |  etl_customer_segmentation
+        v
+customer_olap  (one row per customer: recency, frequency, monetary, variety)
+        |
+        |  segment_customers
+        v
+KMeans on scaled features  ->  cluster profile  ->  named segments
         |
         v
-   ETL Command --> CustomerOLAP (OLAP table)
-        |
-        v
-  Training Command --> Random Forest Model (.pkl)
-        |
-        v
-   Django Views --> Dashboard + Prediction API
+Django views: dashboard, customer list, segment assignment
 ```
 
-## Tech Stack
+The two steps are separate on purpose. The ETL produces features and nothing
+else; segmenting is a decision made from those features, not a column derived
+alongside them.
 
-- **Backend:** Django, Python
-- **Database:** PostgreSQL (dvdrental sample DB)
-- **ML:** Scikit-learn (Random Forest, StandardScaler, LabelEncoder)
-- **Frontend:** Django templates, HTML/CSS
+## Features used
 
-## Project Structure
+| Feature | Meaning | RFM axis |
+|---|---|---|
+| `recency_days` | Days from the customer's last rental to the latest rental in the dataset | Recency |
+| `rental_count` | Number of rentals | Frequency |
+| `total_payment` | Sum of payments | Monetary |
+| `avg_payment` | Mean payment per transaction | Monetary |
+| `distinct_films` | Number of different films rented | Variety |
+| `avg_rental_duration_days` | Mean days held per rental | Behaviour |
+
+Recency is measured against the most recent rental **in the data**, not against
+today. The sample database ends in 2006, so measuring against the current date
+would make every customer equally lapsed and recency would carry no signal.
+
+## Why clustering and not classification
+
+An earlier version of this project created the target like this:
+
+```python
+df['segment'] = pd.qcut(df['total_payment'], q=3,
+                        labels=['Low Value', 'Medium Value', 'High Value'])
+```
+
+and then trained a Random Forest whose feature list still contained
+`total_payment`. The label was a deterministic function of a feature the model
+could see, so the model was recovering an arithmetic rule rather than learning a
+pattern. Accuracy sat near 1.00, which looked like a good result and was
+actually the evidence of the problem. That is target leakage.
+
+Customer segments have no ground truth to predict, so segmentation is a
+clustering problem. `segment_customers` scales the features, chooses `k` by
+silhouette score, profiles each cluster from its own feature means, and names
+the segments from that profile. It records a silhouette score and deliberately
+records no accuracy, because there is nothing to be accurate against.
+
+If a supervised model is wanted here, the target has to be something the
+features do not already contain, for example whether a customer rents again in
+the next 30 days, trained only on data from before that window.
+
+## Setup
+
+```bash
+git clone https://github.com/reganalbione-byte/dvdrental-customer-segmentation.git
+cd dvdrental-customer-segmentation
+
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+cp .env.example .env        # then fill in your own values
+python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
+```
+
+Load the `dvdrental` sample database into PostgreSQL first, then:
+
+```bash
+python manage.py migrate
+python manage.py etl_customer_segmentation
+python manage.py segment_customers
+python manage.py runserver
+```
+
+`segment_customers` searches `k` from 2 to 8 and keeps the best silhouette.
+Pass `--k 4` to force a value.
+
+## Configuration
+
+All configuration comes from environment variables, listed in `.env.example`.
+`.env` is gitignored. Nothing in this repository contains a credential.
+
+## Project layout
 
 ```
-âââ manage.py
-âââ dvdrental_project/
-â   âââ settings.py              # Django config, PostgreSQL connection
-â   âââ urls.py                  # Root URL routing
-â   âââ wsgi.py
-âââ customer_analytics/
-â   âââ models.py                # ORM models: Customer, Payment, Rental (OLTP), CustomerOLAP, ModelInfo
-â   âââ views.py                 # Views: dashboard, predict, ETL status, model info
-â   âââ urls.py                  # App URL patterns
-â   âââ forms.py                 # CustomerPredictionForm (7 feature inputs)
-â   âââ admin.py                 # Admin registration for OLAP + ModelInfo
-â   âââ management/commands/
-â       âââ etl_customer_segmentation.py    # ETL pipeline command
-â       âââ train_customer_segmentation.py  # Model training command
-âââ README.md
+manage.py
+dvdrental_project/
+    settings.py                 # env-driven configuration
+    urls.py
+customer_analytics/
+    models.py                   # OLTP mirrors (unmanaged) + CustomerOLAP + ModelInfo
+    views.py                    # pages and JSON endpoints
+    forms.py                    # segment assignment inputs
+    admin.py
+    urls.py
+    migrations/
+    templates/customer_analytics/
+    management/commands/
+        etl_customer_segmentation.py
+        segment_customers.py
 ```
 
-## How It Works
+## Notes on the data model
 
-1. **Run ETL** -- `python manage.py etl_customer_segmentation` extracts customer behavior from the dvdrental tables (customer, payment, rental, inventory, film) and computes features like total payment, rental count, average payment, rental duration, and film diversity. Results are stored in the CustomerOLAP table.
+`Customer`, `Payment` and `Rental` mirror tables that already exist in the
+sample database and are declared `managed = False`, so Django never tries to
+create or alter them. `CustomerOLAP` and `ModelInfo` are this project's own
+tables and are migrated normally.
 
-2. **Train Model** -- `python manage.py train_customer_segmentation` reads the OLAP data, applies StandardScaler, trains a Random Forest classifier, and saves the model + encoders as pickle files. Model metadata (accuracy, feature importances) is stored in the ModelInfo table.
+The metric fields on `ModelInfo` are nullable. A clustering run fills in
+`silhouette` and leaves accuracy, precision, recall and F1 null, because writing
+zero there would read as a real score of zero rather than a metric that does not
+apply.
 
-3. **Use the App** -- Navigate to the web interface to view the dashboard, browse customer segments, or predict the segment for new customer data.
+## What I learned
 
-## What I Learned
-
-- Designing an ETL pipeline that bridges OLTP and OLAP schemas within the same database is a practical pattern for analytics on transactional data.
-- Django management commands are a clean way to expose data pipelines as CLI tools while keeping everything within the Django ecosystem.
-- Random Forest works well for customer segmentation when you have interpretable features -- feature importances map directly to business insights about what drives customer value.
+- Bridging an OLTP schema and an OLAP table inside the same database is a
+  practical pattern for analytics on transactional data, and Django management
+  commands are a clean way to expose the pipeline as CLI steps.
+- Finding target leakage in my own project taught me more than the model did.
+  The tell was the accuracy: a segmentation model scoring near 1.00 on held-out
+  data usually means the label was derived from a feature, not that the model is
+  good.
+- Naming clusters from their own profile, rather than deciding the names first
+  and forcing data into them, is what makes the segments mean something. "At
+  Risk" only appears when a cluster's recency actually says so.

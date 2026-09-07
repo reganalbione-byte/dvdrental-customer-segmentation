@@ -1,0 +1,45 @@
+{% extends "customer_analytics/base.html" %}
+{% block content %}
+<h1>Assign a segment</h1>
+<p class="sub">Places an unseen customer into the nearest existing cluster.</p>
+
+{% if not model_ready %}
+<div class="note">No fitted model found. Run <code>python manage.py segment_customers</code> first.</div>
+{% endif %}
+
+<form id="f">
+  {% csrf_token %}
+  {% for field in form %}
+    <div class="field">
+      <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+      {{ field }}
+      {% if field.help_text %}<div class="help">{{ field.help_text }}</div>{% endif %}
+    </div>
+  {% endfor %}
+  <button type="submit" {% if not model_ready %}disabled{% endif %}>Assign segment</button>
+</form>
+
+<div id="result"></div>
+
+<script>
+document.getElementById('f').addEventListener('submit', async function (e) {
+  e.preventDefault();
+  const out = document.getElementById('result');
+  out.textContent = 'Working...';
+  try {
+    const res = await fetch("{% url 'customer_analytics:predict_customer' %}",
+                            { method: 'POST', body: new FormData(this) });
+    const data = await res.json();
+    if (data.success) {
+      out.innerHTML = '<div class="note"><strong>' + data.segment +
+                      '</strong> (cluster ' + data.cluster + ')<br>' + data.note + '</div>';
+    } else {
+      out.innerHTML = '<div class="note">' +
+                      (data.error || JSON.stringify(data.errors)) + '</div>';
+    }
+  } catch (err) {
+    out.innerHTML = '<div class="note">Request failed: ' + err.message + '</div>';
+  }
+});
+</script>
+{% endblock %}

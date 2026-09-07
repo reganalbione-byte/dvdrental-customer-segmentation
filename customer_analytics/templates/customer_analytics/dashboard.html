@@ -1,0 +1,36 @@
+{% extends "customer_analytics/base.html" %}
+{% block content %}
+<h1>Dashboard</h1>
+<p class="sub">Segment distribution and the cluster profile behind it.</p>
+
+{% if segments %}
+<table>
+  <tr><th>Segment</th><th class="num">Customers</th>      <th class="num">Revenue</th><th class="num">Avg recency, days</th><th>Relative size</th></tr>
+  {% for s in segments %}
+  <tr><td>{{ s.segment }}</td>
+      <td class="num">{{ s.count }}</td>
+      <td class="num">{{ s.total_revenue|floatformat:2 }}</td>
+      <td class="num">{{ s.avg_recency|floatformat:0 }}</td>
+      <td style="width:180px"><div class="bar"><span style="width:{% widthratio s.count segments.0.count 100 %}%"></span></div></td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h1 style="margin-top:34px;font-size:17px">Top customers</h1>
+<table>
+  <tr><th>Customer</th><th>Segment</th><th class="num">Total paid</th><th class="num">Rentals</th></tr>
+  {% for c in top_customers %}
+  <tr><td>{{ c.first_name }} {{ c.last_name }}</td><td>{{ c.segment|default:"-" }}</td>
+      <td class="num">{{ c.total_payment }}</td><td class="num">{{ c.rental_count }}</td></tr>
+  {% endfor %}
+</table>
+
+<div class="note">
+Segments come from KMeans on scaled behavioural features, not from a payment
+threshold. The cluster profile that produced these names is stored with the
+model and visible on the Models page.
+</div>
+{% else %}
+<div class="note">Nothing to show yet. Run the pipeline first.</div>
+{% endif %}
+{% endblock %}

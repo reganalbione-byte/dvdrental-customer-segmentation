@@ -1,0 +1,34 @@
+{% extends "customer_analytics/base.html" %}
+{% block content %}
+<h1>Overview</h1>
+<p class="sub">Customer behaviour aggregated from the dvdrental transactional database.</p>
+
+<div class="cards">
+  <div class="card"><div class="n">{{ total_customers }}</div><div class="l">Customers</div></div>
+  <div class="card"><div class="n">{{ total_revenue }}</div><div class="l">Total payments</div></div>
+  <div class="card"><div class="n">{{ total_rentals }}</div><div class="l">Rentals</div></div>
+  <div class="card"><div class="n">{{ avg_payment }}</div><div class="l">Average payment</div></div>
+</div>
+
+{% if segments %}
+<table>
+  <tr><th>Segment</th><th class="num">Customers</th><th class="num">Revenue</th>
+      <th class="num">Avg revenue</th><th class="num">Avg rentals</th><th class="num">Avg recency, days</th></tr>
+  {% for s in segments %}
+  <tr><td>{{ s.segment }}</td><td class="num">{{ s.count }}</td>
+      <td class="num">{{ s.total_revenue|floatformat:2 }}</td>
+      <td class="num">{{ s.avg_revenue|floatformat:2 }}</td>
+      <td class="num">{{ s.avg_rentals|floatformat:1 }}</td>
+      <td class="num">{{ s.avg_recency|floatformat:0 }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}
+<div class="note">No segments yet. Run <code>python manage.py etl_customer_segmentation</code>
+then <code>python manage.py segment_customers</code>.</div>
+{% endif %}
+
+{% if latest_model %}
+<div class="note">Current model: {{ latest_model.model_name }}, {{ latest_model.headline_metric }},
+fitted {{ latest_model.trained_at|date:"j M Y" }}.</div>
+{% endif %}
+{% endblock %}

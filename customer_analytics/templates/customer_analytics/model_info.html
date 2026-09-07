@@ -1,0 +1,22 @@
+{% extends "customer_analytics/base.html" %}
+{% block content %}
+<h1>Models</h1>
+<p class="sub">Every fitted model, most recent first.</p>
+
+<table>
+  <tr><th>Name</th><th>Type</th><th>Metric</th><th>Fitted</th></tr>
+  {% for m in models %}
+  <tr><td>{{ m.model_name }}</td><td>{{ m.model_type }}</td>
+      <td>{{ m.headline_metric }}</td><td>{{ m.trained_at|date:"j M Y, H:i" }}</td></tr>
+  {% empty %}
+  <tr><td colspan="4">No models fitted yet.</td></tr>
+  {% endfor %}
+</table>
+
+<div class="note">
+Clustering runs record a silhouette score and no accuracy. Accuracy needs a
+ground-truth label, and customer segments do not have one. A high accuracy here
+would mean the label had been derived from the features, which is exactly the
+problem this pipeline was rewritten to remove.
+</div>
+{% endblock %}

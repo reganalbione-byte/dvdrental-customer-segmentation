@@ -1,0 +1,12 @@
+.env
+*.pkl
+ml_models/
+customer_olap_data.csv
+__pycache__/
+*.py[cod]
+db.sqlite3
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,24 @@
+{% extends "customer_analytics/base.html" %}
+{% block content %}
+<h1>Pipeline</h1>
+<p class="sub">Two steps, run in order.</p>
+
+<div class="cards">
+  <div class="card"><div class="n">{{ olap_rows }}</div><div class="l">Rows in the OLAP table</div></div>
+  <div class="card"><div class="n">{{ segmented_rows }}</div><div class="l">Rows with a segment</div></div>
+</div>
+
+<table>
+  <tr><th>Step</th><th>Command</th><th>What it does</th></tr>
+  <tr><td>1</td><td><code>python manage.py etl_customer_segmentation</code></td>
+      <td>Aggregates rentals and payments into customer-level features, including recency.</td></tr>
+  <tr><td>2</td><td><code>python manage.py segment_customers</code></td>
+      <td>Clusters those features, profiles the clusters, and writes the segment back.</td></tr>
+</table>
+
+<div class="note">
+The ETL does not assign segments. It used to derive them from payment quantiles,
+which made the label a restatement of a feature. Keeping the two steps separate
+is what makes the segmentation a real result rather than a lookup.
+</div>
+{% endblock %}

@@ -1,201 +1,208 @@
+"""
+Views for the customer analytics app.
+
+Rewritten. The previous views.py was corrupted in the repository from the
+predict view onwards: roughly half the file was unreadable bytes rather than
+Python, so the module could not be imported and the project would not start.
+"""
+
 import json
 import os
-import numpy as np
-import pandas as pd
+
 import joblib
-
-from django.shortcuts import render
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
+import pandas as pd
 from django.conf import settings
-from django.db.models import Sum, Count, Avg, Max, Min
 from django.core.management import call_command
+from django.db.models import Avg, Count, Q, Sum
+from django.http import JsonResponse
+from django.shortcuts import render
+from django.views.decorators.http import require_POST
 
-from .models import Customer, Payment, Rental, CustomerOLAP, ModelInfo
 from .forms import CustomerPredictionForm
+from .models import CustomerOLAP, ModelInfo
+
+MODEL_FILENAME = "customer_segmentation_kmeans.pkl"
 
 
-# =====================================================
-# Home Page
-# =====================================================
+# ---------------------------------------------------------------- helpers
+def _load_model():
+    """Return the saved clustering bundle, or None if nothing is trained yet."""
+    path = os.path.join(settings.MODEL_DIR, MODEL_FILENAME)
+    if not os.path.exists(path):
+        return None
+    return joblib.load(path)
+
+
+def _segment_summary():
+    return list(
+        CustomerOLAP.objects
+        .exclude(segment__isnull=True)
+        .values("segment")
+        .annotate(
+            count=Count("customer_id"),
+            total_revenue=Sum("total_payment"),
+            avg_revenue=Avg("total_payment"),
+            avg_rentals=Avg("rental_count"),
+            avg_recency=Avg("recency_days"),
+        )
+        .order_by("-total_revenue")
+    )
+
+
+# ---------------------------------------------------------------- pages
 def home(request):
-    """Landing page with overview stats"""
-    total_customers = CustomerOLAP.objects.count()
-    total_revenue = CustomerOLAP.objects.aggregate(total=Sum('total_payment'))['total'] or 0
-    total_rentals = CustomerOLAP.objects.aggregate(total=Sum('rental_count'))['total'] or 0
-    avg_payment = CustomerOLAP.objects.aggregate(avg=Avg('avg_payment'))['avg'] or 0
-    latest_model = ModelInfo.objects.first()
-
-    # Segment counts
-    segments = CustomerOLAP.objects.values('segment').annotate(
-        count=Count('customer_id')
-    ).order_by('segment')
-
-    context = {
-        'total_customers': total_customers,
-        'total_revenue': round(float(total_revenue), 2),
-        'total_rentals': total_rentals,
-        'avg_payment': round(float(avg_payment), 2),
-        'latest_model': latest_model,
-        'segments': list(segments),
-    }
-    return render(request, 'customer_analytics/home.html', context)
+    agg = CustomerOLAP.objects.aggregate(
+        customers=Count("customer_id"),
+        revenue=Sum("total_payment"),
+        rentals=Sum("rental_count"),
+        avg_payment=Avg("avg_payment"),
+    )
+    return render(request, "customer_analytics/home.html", {
+        "total_customers": agg["customers"] or 0,
+        "total_revenue": round(float(agg["revenue"] or 0), 2),
+        "total_rentals": agg["rentals"] or 0,
+        "avg_payment": round(float(agg["avg_payment"] or 0), 2),
+        "latest_model": ModelInfo.objects.first(),
+        "segments": _segment_summary(),
+    })
 
 
-# =====================================================
-# Customer List
-# =====================================================
 def customer_list(request):
-    """View semua customer dengan data OLAP"""
-    segment_filter = request.GET.get('segment', '')
-    search = request.GET.get('search', '')
+    segment = request.GET.get("segment", "")
+    search = request.GET.get("search", "")
 
-    customers = CustomerOLAP.objects.all()
-
-    if segment_filter:
-        customers = customers.filter(segment=segment_filter)
+    qs = CustomerOLAP.objects.all()
+    if segment:
+        qs = qs.filter(segment=segment)
     if search:
-        customers = customers.filter(
-            first_name__icontains=search
-        ) | customers.filter(
-            last_name__icontains=search
-        ) | customers.filter(
-            email__icontains=search
+        qs = qs.filter(
+            Q(first_name__icontains=search)
+            | Q(last_name__icontains=search)
+            | Q(email__icontains=search)
         )
 
-    customers = customers.order_by('-total_payment')[:100]
+    return render(request, "customer_analytics/customer_list.html", {
+        "customers": qs.order_by("-total_payment")[:100],
+        "segment_filter": segment,
+        "search": search,
+        "all_segments": (CustomerOLAP.objects
+                         .exclude(segment__isnull=True)
+                         .values_list("segment", flat=True)
+                         .distinct()
+                         .order_by("segment")),
+    })
 
-    context = {
-        'customers': customers,
-        'segment_filter': segment_filter,
-        'search': search,
-    }
-    return render(request, 'customer_analytics/customer_list.html', context)
 
-
-# =====================================================
-# Dashboard - Visualization
-# =====================================================
 def dashboard(request):
-    """Dashboard dengan charts dan visualisasi"""
-    # Segment distribution
-    segments = CustomerOLAP.objects.values('segment').annotate(
-        count=Count('customer_id'),
-        total_rev=Sum('total_payment'),
-        avg_rev=Avg('total_payment'),
-        avg_rentals=Avg('rental_count'),
-    ).order_by('segment')
+    segments = _segment_summary()
+    latest = ModelInfo.objects.first()
 
-    # Latest model info
-    latest_model = ModelInfo.objects.first()
-    feature_importance = {}
-    if latest_model and latest_model.features:
+    cluster_profile = {}
+    if latest and latest.features:
         try:
-            feat_data = json.loads(latest_model.features)
-            feature_importance = feat_data.get('feature_importance', {})
+            cluster_profile = json.loads(latest.features).get("cluster_profile", {})
         except json.JSONDecodeError:
             pass
 
-    # Top customers per segment
-    top_high = CustomerOLAP.objects.filter(segment='High Value').order_by('-total_payment')[:5]
-    top_medium = CustomerOLAP.objects.filter(segment='Medium Value').order_by('-total_payment')[:5]
-    top_low = CustomerOLAP.objects.filter(segment='Low Value').order_by('-total_payment')[:5]
-
-    # Store distribution
-    store_data = CustomerOLAP.objects.values('store_id', 'segment').annotate(
-        count=Count('customer_id')
-    ).order_by('store_id', 'segment')
-
-    context = {
-        'segments': list(segments),
-        'segments_json': json.dumps(list(segments), default=str),
-        'feature_importance': json.dumps(feature_importance),
-        'latest_model': latest_model,
-        'top_high': top_high,
-        'top_medium': top_medium,
-        'top_low': top_low,
-        'store_data': json.dumps(list(store_data), default=str),
-    }
-    return render(request, 'customer_analytics/dashboard.html', context)
+    return render(request, "customer_analytics/dashboard.html", {
+        "segments": segments,
+        "segments_json": json.dumps(segments, default=str),
+        "cluster_profile": json.dumps(cluster_profile, default=str),
+        "latest_model": latest,
+        "top_customers": CustomerOLAP.objects.order_by("-total_payment")[:10],
+        "store_data": json.dumps(
+            list(CustomerOLAP.objects
+                 .exclude(segment__isnull=True)
+                 .values("store_id", "segment")
+                 .annotate(count=Count("customer_id"))
+                 .order_by("store_id", "segment")),
+            default=str),
+    })
 
 
-# =====================================================
-# Predict Customer Segment
-# =====================================================
 def predict(request):
-    """Form untuk prediksi segmen customer baru"""
-    form = CustomerPredictionForm()
-    context = {'form': form}
-    return render(request, 'customer_analytics/predict.html', context)
-ÜÜÙ^[\YYXÝØÝ\ÝÛY\\]Y\Ý
-NTH[Ú[[ZÈYZÜÚH
-RV
-HY\]Y\ÝY]ÙOH	ÔÔÕ	ÎN]HHÛÛØYÊ\]Y\ÝÙJBÈØY[Ù[[[ÛÙ\[Ù[Ü]HÜË]Ú[Ù][ÜËSÑSÑT	ØÝ\ÝÛY\ÜÙYÛY[][ÛÜÛ	ÊB[ÛÙ\Ü]HÜË]Ú[Ù][ÜËSÑSÑT	ØÝ\ÝÛY\ÜÙYÛY[][ÛÛKÛ	ÊBYÝÜË]^\ÝÊ[Ù[Ü]
-N]\ÛÛ\ÜÛÙJÉÙ\ÜÎ	Ó[Ù[ÝÝ[X\ÙHZ[H[Ù[\ÝßKÝ]\ÏM
-B[Ù[HØXØY
-[Ù[Ü]
-BHHØXØY
-[ÛÙ\Ü]
-BÈ\\H[]X]\\ÂX]\\ÈH\^JÖÂØ]
-]KÙ]
-	ÝÝ[Ü^[Y[	Ë
-JK[
-]KÙ]
-	Ü[[ØÛÝ[	Ë
-JKØ]
-]KÙ]
-	Ø]×Ü^[Y[	Ë
-JKØ]
-]KÙ]
-	ÛX^Ü^[Y[	Ë
-JKØ]
-]KÙ]
-	ÛZ[Ü^[Y[	Ë
-JK[
-]KÙ]
-	Ù\Ý[ÝÙ[\ÉË
-JKØ]
-]KÙ]
-	Ø]×Ü[[Ù\][ÛÙ^\ÉË
-JKWJBÈYXÝYXÝ[ÛÙ[ÛÙYH[Ù[YXÝ
-X]\\ÊVÌBYXÝ[ÛÜØHH[Ù[YXÝÜØJX]\\ÊVÌBYXÝ[ÛÛX[HK[\ÙWÝ[ÙÜJÜYXÝ[ÛÙ[ÛÙYJVÌBÈÛ\ÜÈØX[]Y\ÂØWÙXÝHÂK[\ÙWÝ[ÙÜJÚWJVÌNÝ[
-Ø]
-
-H
-LBÜK[[[Y\]JYXÝ[ÛÜØJBB]\ÛÛ\ÜÛÙJÂ	ÜYXÝ[ÛÎYXÝ[ÛÛX[	ÜØX[]Y\ÉÎØWÙXÝ	Ú[]Ù]IÎ]KJB^Ù\^Ù\[Û\ÈN]\ÛÛ\ÜÛÙJÉÙ\ÜÎÝJ_KÝ]\ÏML
-B]\ÛÛ\ÜÛÙJÉÙ\ÜÎ	ÔÔÕY]Ù\]Z\Y	ßKÝ]\ÏM
-JBÈOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOBÈUÝ]\ÂÈOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOBY]ÜÝ]\Ê\]Y\Ý
-NY]ÈUÝ]\È[YÙÙ\UÛ\ØÛÝ[HÝ\ÝÛY\ÓTØXÝËÛÝ[
+    return render(request, "customer_analytics/predict.html", {
+        "form": CustomerPredictionForm(),
+        "model_ready": _load_model() is not None,
+    })
 
-BÙYÛY[ÈHÝ\ÝÛY\ÓTØXÝË[Y\Ê	ÜÙYÛY[	ÊK[Ý]JÛÝ[PÛÝ[
-	ØÝ\ÝÛY\ÚY	ÊB
-KÜ\ØJ	ÜÙYÛY[	ÊBÛÛ^HÂ	ÛÛ\ØÛÝ[	ÎÛ\ØÛÝ[	ÜÙYÛY[ÉÎ\Ý
-ÙYÛY[ÊKB]\[\\]Y\Ý	ØÝ\ÝÛY\Ø[[]XÜËÙ]ÜÝ]\Ë[	ËÛÛ^
-BÜÜÙ^[\Y[Ù]
-\]Y\Ý
-NTH[Ú[ÈYÙÙ\UY\]Y\ÝY]ÙOH	ÔÔÕ	ÎNØ[ØÛÛ[X[
-	Ù]ØÝ\ÝÛY\ÜÙYÛY[][ÛÊBÛÝ[HÝ\ÝÛY\ÓTØXÝËÛÝ[
 
-B]\ÛÛ\ÜÛÙJÂ	ÜÝ]\ÉÎ	ÜÝXØÙ\ÜÉË	ÛY\ÜØYÙIÎÑUÛÛ\]YØÛÝ[HÝ\ÝÛY\XÛÜÈØÙ\ÜÙYË	ØÛÝ[	ÎÛÝ[JB^Ù\^Ù\[Û\ÈN]\ÛÛ\ÜÛÙJÉÜÝ]\ÉÎ	Ù\ÜË	ÛY\ÜØYÙIÎÝJ_KÝ]\ÏML
-B]\ÛÛ\ÜÛÙJÉÙ\ÜÎ	ÔÔÕY]Ù\]Z\Y	ßKÝ]\ÏM
-JBÜÜÙ^[\Y[ÝZ[[Ê\]Y\Ý
-NTH[Ú[ÈYÙÙ\[Ù[Z[[ÈY\]Y\ÝY]ÙOH	ÔÔÕ	ÎNØ[ØÛÛ[X[
-	ÝZ[ØÝ\ÝÛY\ÜÙYÛY[][ÛÊB]\ÝH[Ù[[ËØXÝË\Ý
+def etl_status(request):
+    return render(request, "customer_analytics/etl_status.html", {
+        "olap_rows": CustomerOLAP.objects.count(),
+        "segmented_rows": CustomerOLAP.objects.exclude(segment__isnull=True).count(),
+        "latest_model": ModelInfo.objects.first(),
+    })
 
-B]\ÛÛ\ÜÛÙJÂ	ÜÝ]\ÉÎ	ÜÝXØÙ\ÜÉË	ÛY\ÜØYÙIÎ	Ó[Ù[Z[[ÈÛÛ\]YË	ØXØÝ\XÞIÎØ]
-]\ÝXØÝ\XÞJHY]\Ý[ÙHJB^Ù\^Ù\[Û\ÈN]\ÛÛ\ÜÛÙJÉÜÝ]\ÉÎ	Ù\ÜË	ÛY\ÜØYÙIÎÝJ_KÝ]\ÏML
-B]\ÛÛ\ÜÛÙJÉÙ\ÜÎ	ÔÔÕY]Ù\]Z\Y	ßKÝ]\ÏM
-JBÈOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOBÈ[Ù[[ÂÈOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOBY[Ù[Ú[Ê\]Y\Ý
-NY]È[Z[Y[Ù[[È[Ù[ÈH[Ù[[ËØXÝË[
 
-BÛÛ^HÉÛ[Ù[ÉÎ[Ù[ßB]\[\\]Y\Ý	ØÝ\ÝÛY\Ø[[]XÜËÛ[Ù[Ú[Ë[	ËÛÛ^
-BÈOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOBÈ\ÚØ\]HTH
-ÜRVÚ\\]\ÊBÈOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOBY\ÚØ\Ù]J\]Y\Ý
-NTH[Ú[]\[È\ÚØ\]H\ÈÓÓÙYÛY[ÈHÝ\ÝÛY\ÓTØXÝË[Y\Ê	ÜÙYÛY[	ÊK[Ý]JÛÝ[PÛÝ[
-	ØÝ\ÝÛY\ÚY	ÊKÝ[Ü]TÝ[J	ÝÝ[Ü^[Y[	ÊK]×Ü]P]Ê	ÝÝ[Ü^[Y[	ÊK]×Ü[[ÏP]Ê	Ü[[ØÛÝ[	ÊK
-KÜ\ØJ	ÜÙYÛY[	ÊB]\ÝÛ[Ù[H[Ù[[ËØXÝË\Ý
+def model_info(request):
+    return render(request, "customer_analytics/model_info.html", {
+        "models": ModelInfo.objects.all()[:20],
+    })
 
-BX]\WÚ[\Ü[ÙHHßBY]\ÝÛ[Ù[[]\ÝÛ[Ù[X]\\ÎNX]Ù]HHÛÛØYÊ]\ÝÛ[Ù[X]\\ÊBX]\WÚ[\Ü[ÙHHX]Ù]KÙ]
-	ÙX]\WÚ[\Ü[ÙIËßJB^Ù\ÛÛÓÓXÛÙQ\Ü\ÜÂ]\ÛÛ\ÜÛÙJÂ	ÜÙYÛY[ÉÎ\Ý
-ÙYÛY[ÊK	ÙX]\WÚ[\Ü[ÙIÎX]\WÚ[\Ü[ÙK	Û[Ù[ØXØÝ\XÞIÎØ]
-]\ÝÛ[Ù[XØÝ\XÞJHY]\ÝÛ[Ù[[ÙHKY][\ÝB
+
+# ---------------------------------------------------------------- API
+@require_POST
+def predict_customer(request):
+    """Assign a segment to an unseen customer using the saved clustering model."""
+    form = CustomerPredictionForm(request.POST)
+    if not form.is_valid():
+        return JsonResponse({"success": False, "errors": form.errors}, status=400)
+
+    bundle = _load_model()
+    if bundle is None:
+        return JsonResponse(
+            {"success": False,
+             "error": "No model has been fitted yet. Run: python manage.py segment_customers"},
+            status=409)
+
+    features = bundle["features"]
+    row = pd.DataFrame([{f: float(form.cleaned_data[f]) for f in features}])[features]
+
+    cluster = int(bundle["pipeline"].predict(row)[0])
+    segment = bundle["names"].get(cluster, f"Cluster {cluster}")
+
+    return JsonResponse({
+        "success": True,
+        "cluster": cluster,
+        "segment": segment,
+        "note": ("Assigned to the nearest cluster centroid. This is an assignment, "
+                 "not a probabilistic prediction, so no confidence score is reported."),
+    })
+
+
+def dashboard_data(request):
+    return JsonResponse({"segments": _segment_summary()}, safe=False, encoder=DecimalEncoder)
+
+
+@require_POST
+def run_etl(request):
+    try:
+        call_command("etl_customer_segmentation")
+    except Exception as exc:  # surfaced to the user, not swallowed
+        return JsonResponse({"success": False, "error": str(exc)}, status=500)
+    return JsonResponse({"success": True, "rows": CustomerOLAP.objects.count()})
+
+
+@require_POST
+def run_segmentation(request):
+    try:
+        call_command("segment_customers")
+    except Exception as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=500)
+    latest = ModelInfo.objects.first()
+    return JsonResponse({
+        "success": True,
+        "model": latest.model_name if latest else None,
+        "silhouette": float(latest.silhouette) if latest and latest.silhouette else None,
+    })
+
+
+class DecimalEncoder(json.JSONEncoder):
+    """Decimal and date values come back from aggregates; make them JSON-safe."""
+
+    def default(self, o):
+        try:
+            return float(o)
+        except (TypeError, ValueError):
+            return str(o)

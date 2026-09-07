@@ -1,17 +1,23 @@
 """
-Django settings for dvdrental_project project.
+Django settings for dvdrental_project.
+
+Configuration comes from environment variables. Copy .env.example to .env and
+fill it in. .env is gitignored, so no credential is ever committed.
 """
 
-from pathlib import Path
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 
-SECRET_KEY = 'django-insecure-change-this-in-production-key-here'
-
-DEBUG = True
-
-ALLOWED_HOSTS = ['*']
+SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]
+DEBUG = os.getenv("DJANGO_DEBUG", "False").lower() == "true"
+ALLOWED_HOSTS = [h.strip() for h in
+                 os.getenv("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",")
+                 if h.strip()]
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -53,17 +59,14 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'dvdrental_project.wsgi.application'
 
-# =============================================================
-# DATABASE - Ganti sesuai credentials PostgreSQL kamu
-# =============================================================
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'dvdrental',          # nama database
-        'USER': 'postgres',            # username postgres kamu
-        'PASSWORD': '123',   # password postgres kamu
-        'HOST': 'localhost',
-        'PORT': '5432',
+        'NAME': os.getenv('POSTGRES_DB', 'dvdrental'),
+        'USER': os.getenv('POSTGRES_USER', 'postgres'),
+        'PASSWORD': os.environ['POSTGRES_PASSWORD'],
+        'HOST': os.getenv('POSTGRES_HOST', 'localhost'),
+        'PORT': os.getenv('POSTGRES_PORT', '5432'),
     }
 }
 
@@ -80,10 +83,8 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = 'static/'
-STATICFILES_DIRS = []
-
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# Model storage path
-MODEL_DIR = os.path.join(BASE_DIR, 'ml_models')
+# Where fitted model artefacts are written. Gitignored.
+MODEL_DIR = BASE_DIR / 'ml_models'
 os.makedirs(MODEL_DIR, exist_ok=True)
