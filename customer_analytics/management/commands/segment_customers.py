@@ -93,8 +93,11 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(f"\nDone. k={k}, silhouette={sil:.3f}"))
         self.stdout.write(
-            "Silhouette runs from -1 to 1. Above roughly 0.5 means the clusters "
-            "are well separated; near 0 means they overlap and k is probably wrong."
+            "Silhouette runs from -1 to 1 and is relative to the dataset, not an "
+            "absolute pass mark. Higher means better separated clusters; near 0 "
+            "means they overlap. A modest score can be the honest answer for data "
+            "that does not contain strongly distinct groups - see the dataset "
+            "caveat in the README."
         )
 
     # -------------------------------------------------------------- helpers

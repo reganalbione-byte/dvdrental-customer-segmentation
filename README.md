@@ -43,6 +43,20 @@ Recency is measured against the most recent rental **in the data**, not against
 today. The sample database ends in 2006, so measuring against the current date
 would make every customer equally lapsed and recency would carry no signal.
 
+### A caveat in this dataset
+
+124 customers have `recency_days` exactly 0. That is not 124 unusually active
+customers, it is an artefact: `dvdrental` contains a single bulk batch of
+rentals all timestamped 2006-02-14 15:16:03. Recency in this data is
+effectively binary, either 0 or roughly 150 to 180 days, and the third cluster
+forms largely along that seam rather than along real customer behaviour.
+
+The silhouette score reflects this. At k=3 it is 0.279, which is weak
+separation. The clustering is implemented correctly; the sample database simply
+does not contain three strongly distinct behavioural groups. On real
+transactional data with rentals spread continuously over time, recency would
+carry the signal it is supposed to.
+
 ## Why clustering and not classification
 
 An earlier version of this project created the target like this:
